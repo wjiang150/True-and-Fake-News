@@ -1,0 +1,243 @@
+---
+title: "MATH680 Project"
+author: "Wenrui Jiang"
+date: "2023-12-05"
+output: pdf_document
+---
+
+```{r,include=FALSE}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(tidyverse)
+library(rpart)
+library(rpart.plot)
+library(tm)
+library(slam)
+library('devtools') 
+library(jiebaR)
+library(wordcloud)
+library(glmnet)
+library(randomForest)
+library(naivebayes)
+library(gbm)
+library(e1071)
+library(caret)
+```
+
+```{r,message=FALSE}
+True <- read_csv("True.csv")
+Fake <- read_csv("Fake.csv")
+True$label <- "True"
+Fake$label <- "Fake"
+Data<-rbind(True,Fake)
+set.seed(122)
+shuffled_df <- Data[sample(nrow(Data)), ]
+```
+
+
+```{r}
+Data<-na.omit(Data)
+data_text<- shuffled_df[c("text","subject","label")]
+data_text$text<-tolower(data_text$text)
+remove_punctuation <- function(text) {
+  cleaned_text <- gsub("[[:punct:]]", "", text)
+  return(cleaned_text)
+}
+data_text$text<-remove_punctuation(data_text$text)
+```
+
+
+```{r}
+corpus <- Corpus(VectorSource(data_text$text))
+stop_words<-stopwords("english")
+preprocess_text <- function(text) {
+  text <- removeNumbers(text)
+  text <- removeWords(text, stop_words)
+  return(text)
+}
+corpus_cleaned <- tm_map(corpus, content_transformer(preprocess_text))
+cleaned_text <- sapply(corpus_cleaned, function(x) { paste(unlist(strsplit(as.character(x), " ")), collapse=" ") })
+data_text$text_clean <- cleaned_text
+```
+
+
+```{r}
+data_true<- data_text[data_text$label=="True",]
+true_corpus<- Corpus(VectorSource(data_true$text_clean[1:length(data_true$text_clean)]))
+true_dtm<- DocumentTermMatrix(true_corpus)
+true_dtm <- removeSparseTerms(true_dtm, sparse = 0.95)
+true_word_freq <- colSums(as.matrix(true_dtm))
+true_sorted_word_freq <- sort(true_word_freq,decreasing = TRUE)
+df_true <- as.data.frame(true_sorted_word_freq)
+df_true$RowIndex <- row.names(df_true)
+df_true_sub <- df_true[1:10,]
+ggplot(data=df_true_sub,aes(x=RowIndex,y=true_sorted_word_freq))+geom_bar(stat = "identity")
+```
+
+
+```{r}
+wordcloud(true_corpus,min.freq = 10000, scale = c(3, 0.5), colors = brewer.pal(8, "Dark2"))
+```
+
+```{r}
+data_fake<- data_text[data_text$label=="Fake",]
+fake_corpus<- Corpus(VectorSource(data_fake$text_clean[1:length(data_fake$text_clean)]))
+fake_dtm<- DocumentTermMatrix(fake_corpus)
+fake_dtm <- removeSparseTerms(fake_dtm, sparse = 0.95)
+fake_word_freq <- colSums(as.matrix(fake_dtm))
+fake_sorted_word_freq <- sort(fake_word_freq,decreasing = TRUE)
+df_fake <- as.data.frame(fake_sorted_word_freq)
+df_fake$RowIndex <- row.names(df_fake)
+df_fake_sub <- df_fake[1:10,]
+ggplot(data=df_fake_sub,aes(x=RowIndex,y=fake_sorted_word_freq))+geom_bar(stat = "identity")
+```
+```{r}
+wordcloud(fake_corpus,min.freq = 10000, scale = c(3, 0.5), colors = brewer.pal(8, "Dark2"))
+```
+
+
+```{r,message=FALSE,warning=FALSE}
+Corpus <- Corpus(VectorSource(data_text$text_clean[1:length(data_text$text_clean)]))
+dtm <- DocumentTermMatrix(Corpus)
+dtm <- removeSparseTerms(dtm, sparse = 0.95)
+tfidf <- weightTfIdf(dtm)
+tfidf_df<- as.data.frame(as.matrix(tfidf))
+label <- (ifelse(data_text$label == "True", 0, 1))
+df<-cbind(tfidf_df,label)
+```
+
+
+
+```{r,message=FALSE}
+set.seed(123)
+train_indices <- sample(1:nrow(df), 0.8 * nrow(df))
+train_data <- df[train_indices, ]
+test_data <- df[-train_indices, ]
+```
+
+
+```{r}
+train_data$label <-as.factor(train_data$label)
+test_data$label<-as.factor(test_data$label)
+logistic_model <- glm(label ~., data = train_data, family = "binomial")
+logistic_predictions <- predict(logistic_model, newdata = test_data, type = "response")
+threshold <- 0.5 
+logistic_binary_predictions <- ifelse(logistic_predictions > threshold, 1, 0)
+conf_matrix_logistic <- table(logistic_binary_predictions, test_data$label)
+print(conf_matrix_logistic)
+sum(logistic_binary_predictions==test_data$label)/(nrow(test_data))
+```
+
+
+```{r}
+p_values <- summary(logistic_model)$coefficients[, 4]
+top_5_variables <- names(sort(p_values)[1:5])
+top_5_variables
+sort(p_values)[1:5]
+```
+
+
+```{r}
+x <- as.matrix(train_data[, -ncol(train_data)])
+y <- train_data$label
+```
+
+
+```{r}
+lasso_model <- cv.glmnet(x, y, alpha = 1, family = "binomial")
+lasso_predictions <- predict(lasso_model, newx = as.matrix(test_data[, -ncol(test_data)]), s = "lambda.min", type = "response")
+lasso_binary_predictions <- ifelse(lasso_predictions > threshold, 1, 0)
+conf_matrix_lasso <- table(lasso_binary_predictions, test_data$label)
+```
+
+
+
+```{r}
+print(conf_matrix_lasso)
+```
+
+```{r}
+coef(lasso_model)
+```
+
+
+```{r}
+ridge_model <- cv.glmnet(x, y, alpha = 0, family = "binomial")
+ridge_predictions <- predict(ridge_model, newx = as.matrix(test_data[, -ncol(test_data)]), s = "lambda.min", type = "response")
+ridge_binary_predictions <- ifelse(ridge_predictions > threshold, 1, 0)
+conf_matrix_ridge <- table(ridge_binary_predictions, test_data$label)
+```
+
+```{r}
+print(conf_matrix_ridge)
+```
+
+
+```{r}
+tree_model <- rpart(label ~ ., data = train_data, method = "class")
+tree_predictions <- predict(tree_model, newdata = test_data, type = "class")
+tree_conf_matrix <- table(tree_predictions, test_data$label)
+print(tree_conf_matrix)
+```
+
+
+```{r}
+rpart.plot(tree_model)
+```
+
+
+```{r}
+df_1<- subset(df, select = -reuters)
+train_indices_1 <- sample(1:nrow(df_1), 0.8 * nrow(df_1))
+train_data_1 <- df_1[train_indices, ]
+test_data_1 <- df_1[-train_indices, ]
+logistic_model_1 <- glm(label ~., data = train_data_1, family = "binomial")
+logistic_predictions_1 <- predict(logistic_model_1, newdata = test_data_1, type = "response")
+threshold <- 0.5 
+logistic_binary_predictions_1 <- ifelse(logistic_predictions_1 > threshold, 1, 0)
+conf_matrix_logistic_1 <- table(logistic_binary_predictions_1, test_data_1$label)
+print(conf_matrix_logistic_1)
+```
+```{r}
+logistic_model_2 <- glm(label ~ reuters, data = train_data, family = "binomial")
+logistic_predictions_2 <- predict(logistic_model_2, newdata = test_data, type = "response")
+threshold <- 0.5 
+logistic_binary_predictions_2 <- ifelse(logistic_predictions_2 > threshold, 1, 0)
+conf_matrix_logistic_2 <- table(logistic_binary_predictions_2, test_data_1$label)
+print(conf_matrix_logistic_2)
+```
+
+```{r}
+p_values <- summary(logistic_model_1)$coefficients[, 4]
+top_5_variables <- names(sort(p_values)[1:5])
+top_5_variables
+sort(p_values)[1:5]
+```
+
+
+```{r}
+tree_model <- rpart(label ~ ., data = train_data_1, method = "class")
+tree_predictions <- predict(tree_model, newdata = test_data_1, type = "class")
+tree_conf_matrix <- table(tree_predictions, test_data_1$label)
+print(tree_conf_matrix)
+rpart.plot(tree_model)
+```
+
+
+```{r}
+train_data$label <- as.factor(train_data$label)
+test_data$label <- as.factor(test_data$label)
+nb_model <- naive_bayes(label ~ ., data = train_data)
+nb_predictions <- predict(nb_model, newdata = test_data)
+conf_matrix_nb <- table(nb_predictions, test_data$label)
+print(conf_matrix_nb)
+```
+
+```{r}
+linear_svm_model <- svm(label ~ ., data = train_data, kernel = "linear", type = "C-classification")
+linear_svm_predictions <- predict(linear_svm_model, newdata = test_data)
+linear_svm_accuracy <- sum(linear_svm_predictions == test_data$label) / nrow(test_data)
+table(linear_svm_predictions,test_data$label)
+print(linear_svm_accuracy)
+```
